@@ -116,6 +116,17 @@ def update_user_click(file_id: str, email: str):
     except Exception as e:
         print(f"Failed to update click status for {email}: {e}")
 
+def update_delete_status(file_id):
+    try:
+        dynamo_table.update_item(
+            Key={"FileId": file_id},
+            UpdateExpression="SET #d = :true",
+            ExpressionAttributeNames={"#d": "Delete"},
+            ExpressionAttributeValues={":true": True}
+        )
+    except Exception as e:
+        print(f"Failed to update delete status for {file_id}: {e}")
+        
 @app.get("/download/{fileid}")
 def download_file(fileid: str, email: str = Query(...)):
     if not fileid or not email:
@@ -132,10 +143,14 @@ def download_file(fileid: str, email: str = Query(...)):
      # Mark user as clicked
     update_user_click(fileid, email)
 
+    if all(file_record["ClickStatus"].values()):
+        update_delete_status(fileid)
+        
     # Generate pre-signed S3 URL
     download_url = generate_file_url(fileid)
     if not download_url:
         raise HTTPException(status_code=500, detail="Could not generate download link")
+
 
     return RedirectResponse(url=download_url)
 
