@@ -8,6 +8,8 @@ from typing import List
 from datetime import datetime
 import uuid
 import time
+import logging
+logger = logging.getLogger(__name__)
 
 # Load environment variable
 load_dotenv()
@@ -71,7 +73,7 @@ async def upload(file: UploadFile = File(...), emails: List[str] = Form(...)):
                 "Emails": emails,
                 "ClickStatus": click_status,
                 "Upload_timestamp": datetime.utcnow().isoformat(),
-                "Delete": False
+                "Deleted": False
             }
         )
 
@@ -82,7 +84,7 @@ async def upload(file: UploadFile = File(...), emails: List[str] = Form(...)):
         }
 
     except Exception as e:
-        print(f"Error uploading file: {str(e)}")
+        logger.exception(f"Error uploading file: {str(e)}")
         return {"error": f"Failed to upload file: {str(e)}"}
 
 
@@ -92,7 +94,7 @@ def get_file_record(file_id: str):
         response = dynamo_table.get_item(Key={"FileId": file_id})
         return response.get("Item")
     except Exception as e:
-        print(f"Error generating pre-signed URL: {str(e)}")
+        logger.exception(f"Error generating pre-signed URL: {str(e)}")
         return HTTPException(status_code=404, detail="File not found.")
 
 def generate_file_url(s3_key: str, original_filename: str):
@@ -103,7 +105,7 @@ def generate_file_url(s3_key: str, original_filename: str):
             ExpiresIn=3600
         )
     except Exception as e:
-        print(f"Error generating pre-signed URL: {str(e)}")
+        logger.exception(f"Error generating pre-signed URL: {str(e)}")
         return None
 
 def update_user_click(file_id: str, email: str):
@@ -115,18 +117,18 @@ def update_user_click(file_id: str, email: str):
             ExpressionAttributeValues={":val": True}
         )
     except Exception as e:
-        print(f"Failed to update click status for {email}: {e}")
+        logger.exception(f"Failed to update click status for {email}: {e}")
 
 def update_delete_status(file_id):
     try:
         dynamo_table.update_item(
             Key={"FileId": file_id},
             UpdateExpression="SET #d = :true",
-            ExpressionAttributeNames={"#d": "Delete"},
+            ExpressionAttributeNames={"#d": "Deleted"},
             ExpressionAttributeValues={":true": True}
         )
     except Exception as e:
-        print(f"Failed to update delete status for {file_id}: {e}")
+        logger.exception(f"Failed to update delete status for {file_id}: {e}")
 
 def check_and_delete_file_later(file_id: str, delay_seconds: int = 5) :
     time.sleep(delay_seconds)
@@ -137,17 +139,15 @@ def check_and_delete_file_later(file_id: str, delay_seconds: int = 5) :
         return
     
     if all(file_record["ClickStatus"].values()):
-        update_delete_status(file_id)
-        
-    if file_record.get("Delete") == True:
-        try:
+        try: 
+            update_delete_status(file_id)
             s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=file_id)
-            print(f"File {file_id} deleted from S3.")
+            logger.info(f"File {file_id} deleted successfully.")
         except Exception as e:
-            print(f"Failed to delete file {file_id}: {e}")
+            logger.exception(f"Failed to delete file {file_id}: {e}")
 
 @app.get("/download/{fileid}")
-def download_file(fileid: str, email: str = Query(...)):
+def download_file(fileid: str, background_tasks: BackgroundTasks, email: str = Query(...)):
     if not fileid or not email:
         raise HTTPException(status_code=400, detail="You dont have access to this file.")
     
@@ -164,19 +164,11 @@ def download_file(fileid: str, email: str = Query(...)):
 
     original_filename = file_record.get("FileName")
 
-    if all(file_record["ClickStatus"].values()):
-        update_delete_status(fileid)
-
-        if file_record.get("Delete") == True:
-            s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=fileid)
-            print(f"[SUCCESS] File {fileid} deleted from S3.")
-
-            
     # Generate pre-signed S3 URL
-    download_url = generate_file_url(fileid)
+    download_url = generate_file_url(fileid, original_filename)
     if not download_url:
         raise HTTPException(status_code=500, detail="Could not generate download link")
-
+    
 
     return RedirectResponse(url=download_url)
 
