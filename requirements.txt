@@ -2,5 +2,3 @@ boto3
 fastapi
 python-dotenv
 unicorn
-
-http://54.163.200.86:8000/download/e560b4a2-5811-47b5-9089-8cbb14dde9a7?email=harshpatel112003@gmail.com
