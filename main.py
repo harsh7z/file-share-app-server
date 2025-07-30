@@ -1,12 +1,13 @@
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException 
+from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, BackgroundTasks 
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import boto3
 from typing import List
 from datetime import datetime
 import uuid
+import time
 
 # Load environment variable
 load_dotenv()
@@ -94,11 +95,11 @@ def get_file_record(file_id: str):
         print(f"Error generating pre-signed URL: {str(e)}")
         return HTTPException(status_code=404, detail="File not found.")
 
-def generate_file_url(s3_key: str):
+def generate_file_url(s3_key: str, original_filename: str):
     try:
         return s3_client.generate_presigned_url(
             'get_object',
-            Params={'Bucket': S3_BUCKET_NAME, 'Key': s3_key},
+            Params={'Bucket': S3_BUCKET_NAME, 'Key': s3_key, 'ResponseContentDisposition': f'attachment; filename="{original_filename}"'},
             ExpiresIn=3600
         )
     except Exception as e:
@@ -126,7 +127,25 @@ def update_delete_status(file_id):
         )
     except Exception as e:
         print(f"Failed to update delete status for {file_id}: {e}")
+
+def check_and_delete_file_later(file_id: str, delay_seconds: int = 5) :
+    time.sleep(delay_seconds)
+    
+    file_record = get_file_record(file_id)
+    
+    if not file_record:
+        return
+    
+    if all(file_record["ClickStatus"].values()):
+        update_delete_status(file_id)
         
+    if file_record.get("Delete") == True:
+        try:
+            s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=file_id)
+            print(f"File {file_id} deleted from S3.")
+        except Exception as e:
+            print(f"Failed to delete file {file_id}: {e}")
+
 @app.get("/download/{fileid}")
 def download_file(fileid: str, email: str = Query(...)):
     if not fileid or not email:
@@ -143,9 +162,16 @@ def download_file(fileid: str, email: str = Query(...)):
      # Mark user as clicked
     update_user_click(fileid, email)
 
+    original_filename = file_record.get("FileName")
+
     if all(file_record["ClickStatus"].values()):
         update_delete_status(fileid)
-        
+
+        if file_record.get("Delete") == True:
+            s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=fileid)
+            print(f"[SUCCESS] File {fileid} deleted from S3.")
+
+            
     # Generate pre-signed S3 URL
     download_url = generate_file_url(fileid)
     if not download_url:
