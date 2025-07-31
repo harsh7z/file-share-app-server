@@ -1,17 +1,27 @@
 import os
-from dotenv import load_dotenv
+import boto3
+
+# Import FastAPI and related modules
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException, BackgroundTasks 
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-import boto3
+
+# Import List for type hinting
 from typing import List
-from datetime import datetime
+
+# Import uuid for generating unique file IDs
 import uuid
+
+# Import time for delay functionality
 import time
+from datetime import datetime
+
+# Logging setup
 import logging
 logger = logging.getLogger(__name__)
 
 # Load environment variable
+from dotenv import load_dotenv
 load_dotenv()
 
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -20,6 +30,7 @@ AWS_REGION = os.getenv("AWS_REGION")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 DYNAMODB_TABLE_NAME = os.getenv("DYNAMODB_TABLE_NAME")
 
+# Fast API setup 
 app = FastAPI()
 
 # Allow CORS for frontend (adjust the origin as needed)
@@ -31,7 +42,7 @@ app.add_middleware(
         allow_headers=["*"],
 )
 
-        # Initialize S3 client
+# Initialize clients
 s3_client = boto3.client(
     "s3",
     aws_access_key_id=AWS_ACCESS_KEY_ID,
@@ -52,20 +63,16 @@ dynamo_table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 async def upload(file: UploadFile = File(...), emails: List[str] = Form(...)):
     content = await file.read()
     try:
-        # Generate a unique FileID (UUID) for your file record
         file_id = str(uuid.uuid4())
 
-        # Initialize click_status map: all emails set to False (not clicked yet)
         click_status = {email: False for email in emails}
         
-        # Upload to S3
         s3_client.put_object(
             Bucket=S3_BUCKET_NAME,
             Key= file_id,
             Body=content
         )
 
-        # Save metadata to DynamoDB
         dynamo_table.put_item(
             Item={
                 "FileId": file_id,
@@ -88,7 +95,7 @@ async def upload(file: UploadFile = File(...), emails: List[str] = Form(...)):
         return {"error": f"Failed to upload file: {str(e)}"}
 
 
-#File Download
+# Download file, check clicked status and delete the file from S3 bucket
 def get_file_record(file_id: str):
     try:
         response = dynamo_table.get_item(Key={"FileId": file_id})
@@ -105,7 +112,7 @@ def generate_file_url(s3_key: str, original_filename: str):
             ExpiresIn=3600
         )
     except Exception as e:
-        logger.exception(f"Error generating pre-signed URL: {str(e)}")
+        logger.exception(f"[ERROR] Error generating pre-signed URL: {str(e)}")
         return None
 
 def update_user_click(file_id: str, email: str):
@@ -117,7 +124,7 @@ def update_user_click(file_id: str, email: str):
             ExpressionAttributeValues={":val": True}
         )
     except Exception as e:
-        logger.exception(f"Failed to update click status for {email}: {e}")
+        logger.exception(f"[ERROR] Failed to update click status for {email}: {e}")
 
 def update_delete_status(file_id):
     try:
@@ -128,10 +135,11 @@ def update_delete_status(file_id):
             ExpressionAttributeValues={":true": True}
         )
     except Exception as e:
-        logger.exception(f"Failed to update delete status for {file_id}: {e}")
+        logger.exception(f"[ERROR] Failed to update delete status for {file_id}: {e}")
 
 def check_and_delete_file_later(file_id: str, delay_seconds: int = 5) :
     time.sleep(delay_seconds)
+    logger.info(f"[DELETE] File delete process started for {file_id}")
     
     file_record = get_file_record(file_id)
     
@@ -139,12 +147,13 @@ def check_and_delete_file_later(file_id: str, delay_seconds: int = 5) :
         return
     
     if all(file_record["ClickStatus"].values()):
+        logger.info(f"[DELETE] All users have clicked the link for {file_id}")
         try: 
             update_delete_status(file_id)
             s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=file_id)
-            logger.info(f"File {file_id} deleted successfully.")
+            logger.info(f"[DELETE] File {file_id} deleted successfully")
         except Exception as e:
-            logger.exception(f"Failed to delete file {file_id}: {e}")
+            logger.exception(f"[ERROR] Failed to delete file {file_id}: {e}")
 
 @app.get("/download/{fileid}")
 def download_file(fileid: str, background_tasks: BackgroundTasks, email: str = Query(...)):
@@ -159,16 +168,15 @@ def download_file(fileid: str, background_tasks: BackgroundTasks, email: str = Q
     if email not in file_record["Emails"]:
         raise HTTPException(status_code=403, detail="Unauthorized user")
     
-     # Mark user as clicked
     update_user_click(fileid, email)
 
     original_filename = file_record.get("FileName")
 
-    # Generate pre-signed S3 URL
     download_url = generate_file_url(fileid, original_filename)
     if not download_url:
         raise HTTPException(status_code=500, detail="Could not generate download link")
     
-
+    background_tasks.add_task(check_and_delete_file_later, fileid)
+    
     return RedirectResponse(url=download_url)
 
